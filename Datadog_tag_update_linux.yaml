@@ -1,0 +1,84 @@
+---
+- name: DataDog Agent troubleshooting
+  hosts: "{{ ansible_limit if ansible_limit not in ['none', 'all'] else 'invalid' }}"
+  become: true
+  vars:
+    datadog_yaml_filepath: "/etc/datadog-agent/datadog.yaml"
+    desired_env: "test"
+  tasks:
+
+  - name: Gather the package facts
+    ansible.builtin.package_facts:
+      manager: auto
+
+  - debug:
+      msg: "Datadog is not installed on this host"
+    when:
+      - "'datadog-agent' not in ansible_facts.packages"
+
+  - name: Fail if Datadog agent is not installed on this host
+    ansible.builtin.fail:
+      msg: "Datadog is not installed on this host, please install and continue"
+    when: "'datadog-agent' not in ansible_facts.packages"
+
+  - name: Check if datadog.yaml file exists
+    ansible.builtin.stat:
+      path: "{{ datadog_yaml_filepath }}"
+    register: datadogyamlstats
+
+  - debug:
+      msg: "datadog.yaml file found - {{ datadog_yaml_filepath }}"
+    when: datadogyamlstats.stat.exists
+
+  - name: Fail if datadog.yaml not found in {{ datadog_yaml_filepath }}
+    ansible.builtin.fail:
+      msg: "datadog.yaml not found at {{ datadog_yaml_filepath }}, please provide correct path or create datadog.yaml file"
+    when: not datadogyamlstats.stat.exists
+
+  - name: Read Datadog configuration file
+    slurp:
+      src: "{{ datadog_yaml_filepath }}"
+    register: datadog_config
+
+  - name: Parse Datadog configuration
+    set_fact:
+      datadog_config_content: "{{ datadog_config.content | b64decode }}"
+
+  - name: Get the current env value from the Datadog configuration
+    set_fact:
+      current_env_value: "{{ (datadog_config_content | from_yaml).env }}"
+    when: datadog_config_content | from_yaml is defined
+
+  - name: Fail if the current env value is equal to the desired env value
+    ansible.builtin.fail:
+      msg: "The current environment is already set to {{ desired_env }}"
+    when: current_env_value == desired_env
+
+  - name: Update the env value in the Datadog configuration file
+    ansible.builtin.lineinfile:
+      path: "{{ datadog_yaml_filepath }}"
+      regexp: '^env:.*'
+      line: "env: {{ desired_env }}"
+    when: current_env_value != desired_env
+
+  - debug:
+      msg: "Restarting DataDog agent"
+
+  - name: Restart datadog-agent
+    ansible.builtin.systemd:
+      name: datadog-agent
+      state: restarted
+    when: current_env_value != desired_env
+
+  - name: Pause for 30 seconds to make sure agent is up
+    ansible.builtin.pause:
+      seconds: 30
+    when: current_env_value != desired_env
+
+  - name: Get datadog Service Status
+    ansible.builtin.systemd:
+      name: "datadog-agent"
+    register: datadog_agent_systemd_status
+
+  - debug:
+      msg: "Datadog agent systemd status - {{ datadog_agent_systemd_status.status.ActiveState }}"
